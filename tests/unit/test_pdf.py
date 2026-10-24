@@ -172,7 +172,10 @@ def test_un_nombre_muy_largo_no_rompe_el_documento():
 
 
 def test_el_mismo_dato_produce_el_mismo_pdf():
-    assert generar_pdf(_datos()) == generar_pdf(_datos())
+    primero = generar_pdf(_datos())
+    segundo = generar_pdf(_datos())
+
+    assert primero == segundo
 
 
 def test_las_fuentes_de_la_marca_van_incrustadas():
