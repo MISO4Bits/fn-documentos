@@ -1,0 +1,234 @@
+openapi: 3.2.0
+info:
+  title: fn-documentos — documento de la póliza
+  version: 0.1.0
+  summary: Función serverless (Cloud Run) que genera el PDF de una póliza, lo guarda en un bucket y entrega un enlace temporal para verlo.
+  description: |
+    Componente "Comunicaciones y Documentos": junto con `fn-notificaciones` (correos). Esta
+    función **crea y sirve documentos**; no envía correos.
+
+    **Dos entradas, mismo almacén:**
+
+    1. **Por evento.** Una suscripción *push* de Pub/Sub, filtrada por `tipo = PolizaEmitida`,
+       entrega aquí cada póliza emitida por CoreTransaccional. La función genera el PDF, lo
+       guarda en el bucket y publica `DocumentoPolizaGenerado` (con la referencia al archivo)
+       para que Core arme el correo con el documento adjunto y lo envíe `fn-notificaciones`.
+    2. **Por llamada.** CoreTransaccional pide el enlace para que el cliente vea su póliza en
+       la web o en la app. Si el PDF todavía no existe, se genera en esa llamada.
+
+    **Idempotencia.** El PDF vive en `polizas/{polizaId}.pdf`: generar dos veces no duplica
+    nada, y el bucket solo acepta la primera escritura. El mismo dato produce el mismo PDF.
+
+    **Confirmación de mensajes (cómo reacciona Pub/Sub):**
+    - `204`: el documento quedó listo y se avisó, o el mensaje no tiene arreglo (mal formado)
+      y se descarta con un error en el log.
+    - `503`: el bucket o Pub/Sub fallaron; Pub/Sub lo reentrega con espera creciente.
+
+    **Aviso garantizado.** `DocumentoPolizaGenerado` se publica en cada entrega del evento,
+    también si el PDF ya existía, para que una publicación fallida no se pierda. Core no manda
+    dos correos por el mismo documento.
+
+    **Acceso.** Cloud Run sin acceso público: solo las cuentas de servicio de la suscripción y
+    de CoreTransaccional pueden invocarla.
+
+servers:
+  - url: https://fn-documentos.internal
+    description: Cloud Run, sin acceso público.
+
+tags:
+  - name: Pub/Sub
+    description: Entrada de la suscripción push.
+  - name: Documentos
+    description: Consulta del documento de una póliza.
+
+paths:
+  /:
+    post:
+      operationId: recibirMensaje
+      tags: [Pub/Sub]
+      summary: Recibe una póliza emitida, genera su PDF y avisa
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SobrePush' }
+      responses:
+        '204':
+          description: Mensaje confirmado (documento listo o mensaje descartado sin arreglo).
+        '503':
+          description: El bucket o Pub/Sub fallaron; Pub/Sub debe reentregar el mensaje.
+
+  /v1/documentos/polizas/enlace:
+    post:
+      operationId: obtenerEnlaceDeLaPoliza
+      tags: [Documentos]
+      summary: Enlace temporal para ver el PDF de una póliza emitida
+      description: |
+        Lo llama CoreTransaccional. Recibe los mismos datos que viajan en `PolizaEmitida`
+        (la función no consulta a nadie) y devuelve un enlace firmado de pocos minutos que
+        abre el documento en el visor del navegador o del celular. Si el PDF no existe,
+        lo genera en esta llamada y avisa con `DocumentoPolizaGenerado`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DatosPoliza' }
+      responses:
+        '200':
+          description: Enlace temporal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Enlace' }
+        '400':
+          description: Los datos de la póliza no son válidos.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problema' }
+        '503':
+          description: El bucket no responde. Reintentar.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problema' }
+
+components:
+  schemas:
+    SobrePush:
+      description: Sobre estándar de una suscripción push de Pub/Sub.
+      type: object
+      required: [message]
+      properties:
+        subscription: { type: string }
+        message:
+          type: object
+          required: [data]
+          properties:
+            data:
+              type: string
+              contentEncoding: base64
+              description: El evento `PolizaEmitida` en JSON, codificado en base64.
+            attributes:
+              type: object
+              additionalProperties: { type: string }
+              description: Incluye `tipo` y el `traceparent` de la traza.
+            messageId: { type: string }
+
+    EventoPolizaEmitida:
+      description: Contenido de `message.data` (una vez decodificado).
+      type: object
+      required: [tipo, datos]
+      properties:
+        tipo: { type: string, const: PolizaEmitida }
+        id: { type: string }
+        ocurridoEn: { type: string, format: date-time }
+        datos: { $ref: '#/components/schemas/DatosPoliza' }
+      examples:
+        - tipo: PolizaEmitida
+          id: 3f2b8a52-6c0e-4d8e-9a7e-1c5d2f9b7a10
+          ocurridoEn: '2026-10-22T15:00:00Z'
+          datos:
+            polizaId: 7c0f2a52-3b6f-4a0e-9e7e-2f6c9d1a8b11
+            clienteId: 7b1d3c2e-0f4a-4b8e-9c55-2a1e6d9f0b34
+            numero: SOL-VH-2026-K7M2Q9
+            emitidaEn: '2026-10-22T15:00:00Z'
+            vigencia: { desde: '2026-10-22T15:00:00Z', hasta: '2027-10-22T15:00:00Z' }
+            coberturas:
+              - { codigo: VIDA, obligatoria: true, sumaAsegurada: 320000000, primaNeta: 49100, iva: 0, primaTotal: 49100 }
+              - { codigo: HOGAR, obligatoria: false, sumaAsegurada: 240000000, primaNeta: 23760, iva: 4514, primaTotal: 28274 }
+            primaTotalMensual: 77374
+            moneda: COP
+            datosCredito: { entidadAcreedora: Bancolombia S.A., valorCredito: 350000000, plazoRestanteMeses: 240, saldoInsoluto: 320000000 }
+            asegurado: { nombre: Sofía Restrepo Uribe, tipoDocumento: CC, numeroDocumento: '1017654456', email: sofia@example.com }
+
+    DatosPoliza:
+      type: object
+      required: [polizaId, numero, emitidaEn, vigencia, coberturas, primaTotalMensual, datosCredito, asegurado]
+      properties:
+        polizaId: { type: string, minLength: 1, maxLength: 64, pattern: '^[0-9A-Za-z_-]+$' }
+        clienteId: { type: [string, 'null'], maxLength: 64 }
+        numero: { type: string, minLength: 1, maxLength: 40, description: 'Número de la póliza, por ejemplo `SOL-VH-2026-K7M2Q9`.' }
+        emitidaEn: { type: string, format: date-time }
+        vigencia:
+          type: object
+          required: [desde, hasta]
+          properties:
+            desde: { type: string, format: date-time }
+            hasta: { type: string, format: date-time }
+        coberturas:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [codigo, sumaAsegurada, primaNeta, iva, primaTotal]
+            properties:
+              codigo: { type: string, enum: [VIDA, HOGAR] }
+              obligatoria: { type: boolean }
+              sumaAsegurada: { type: number }
+              primaNeta: { type: number }
+              iva: { type: number }
+              primaTotal: { type: number }
+        primaTotalMensual: { type: number, description: En pesos colombianos. }
+        moneda: { type: string, enum: [COP] }
+        datosCredito:
+          type: object
+          required: [entidadAcreedora]
+          properties:
+            entidadAcreedora: { type: string, minLength: 1, maxLength: 120 }
+            valorCredito: { type: number }
+            plazoRestanteMeses: { type: integer }
+            saldoInsoluto: { type: number }
+        asegurado:
+          type: object
+          required: [nombre, tipoDocumento, numeroDocumento]
+          description: |
+            El número de documento no sale completo en el PDF: se enmascara el grupo del medio
+            (`C.C. 1.017.xxx.456`).
+          properties:
+            nombre: { type: string, minLength: 1, maxLength: 200 }
+            tipoDocumento: { type: string, enum: [CC, CE, PA, NIT] }
+            numeroDocumento: { type: string, minLength: 1, maxLength: 30 }
+            email: { type: [string, 'null'] }
+
+    Enlace:
+      type: object
+      required: [estado, url, expiraEn]
+      properties:
+        estado: { type: string, const: LISTO }
+        url: { type: string, format: uri, description: Enlace firmado; abre el PDF en el visor, no lo descarga. }
+        expiraEn: { type: string, format: date-time }
+
+    DocumentoPolizaGenerado:
+      description: |
+        Evento que esta función publica en el tópico compartido (atributo `tipo`) cuando el PDF
+        está en el bucket. Lo consume CoreTransaccional para enviar el correo con el adjunto.
+      type: object
+      required: [tipo, datos]
+      properties:
+        tipo: { type: string, const: DocumentoPolizaGenerado }
+        id: { type: string }
+        ocurridoEn: { type: string, format: date-time }
+        datos:
+          type: object
+          required: [polizaId, numero, bucket, objeto, nombreArchivo, contentType]
+          properties:
+            polizaId: { type: string }
+            clienteId: { type: [string, 'null'] }
+            numero: { type: string }
+            bucket: { type: string }
+            objeto: { type: string, description: 'Ruta del PDF en el bucket: `polizas/{polizaId}.pdf`.' }
+            nombreArchivo: { type: string, description: 'Nombre con el que se adjunta, por ejemplo `Poliza-SOL-VH-2026-K7M2Q9.pdf`.' }
+            contentType: { type: string, const: application/pdf }
+
+    Problema:
+      description: Error en formato RFC 9457 (Problem Details for HTTP APIs).
+      type: object
+      properties:
+        type: { type: string, default: 'about:blank' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        errores:
+          type: array
+          items:
+            type: object
+            properties:
+              campo: { type: string }
