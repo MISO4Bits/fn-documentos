@@ -123,6 +123,8 @@ def test_el_pdf_trae_todos_los_datos_de_la_poliza():
         "Total al mes",
         "$77.374",
         "22 oct 2026 al 22 oct 2027",
+        "Renovación",
+        "Automática, cada año",
         "Con la cuota de tu crédito. La cobra Bancolombia S.A.",
         "BENEFICIARIO ONEROSO",
         "El saldo insoluto de la deuda",

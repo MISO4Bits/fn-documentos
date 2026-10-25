@@ -268,6 +268,7 @@ def generar_pdf(datos: DatosPoliza) -> bytes:
         "Vigencia",
         f"{fecha_corta(datos.vigencia.desde)} al {fecha_corta(datos.vigencia.hasta)}",
     )
+    hoja.fila("Renovación", "Automática, cada año")
     entidad = datos.datos_credito.entidad_acreedora
     # "S.A." ya trae su punto: no se duplica al cerrar la frase.
     cierre = "" if entidad.endswith(".") else "."
